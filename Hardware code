@@ -1,0 +1,101 @@
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+#include <TinyGsmClient.h>
+#include <ArduinoJson.h>
+
+// GPS connected to UART2 (RX2 = GPIO16, TX2 = GPIO17)
+HardwareSerial GPS(2);
+TinyGPSPlus gps;
+
+// SIM800L connected to UART1 (RX1 = GPIO4, TX1 = GPIO5)
+#define TINY_GSM_MODEM_SIM800
+#include <TinyGsmClient.h>
+HardwareSerial modemSerial(1);
+TinyGsm modem(modemSerial);
+TinyGsmClient client(modem);
+
+// Ooredoo GSM settings
+const char apn[] = "ooredoo.com";  
+const char user[] = "";           
+const char pass[] = "";           
+
+const char* serverURL = "https://bike-go.workaround.services/api/update/1";
+
+const int id = 1;
+
+void setup() {
+  Serial.begin(115200); // Debugging
+  GPS.begin(9600, SERIAL_8N1, 16, 17); // GPS on UART2
+  modemSerial.begin(9600, SERIAL_8N1, 4, 5); // SIM800L on UART1
+  
+  Serial.println("Initializing modem...");
+  if (!modem.restart()) {
+    Serial.println("Failed to initialize modem. Check connections!");
+    while (true);
+  }
+  Serial.println("Modem initialized!");
+
+  Serial.println("Connecting to GSM network...");
+  if (!modem.gprsConnect(apn, user, pass)) {
+    Serial.println("Failed to connect to GSM network!");
+    while (true);
+  }
+  Serial.println("GSM connected!");
+}
+
+void loop() {
+  while (GPS.available() > 0) { // Check GPS data availability
+    char c = GPS.read();
+    if (gps.encode(c)) { // Parse GPS data
+      if (gps.location.isUpdated()) { // If new location data is available
+        sendLocationToServer(id, gps.location.lat(), gps.location.lng());
+        Serial.println("Location sent successfully!");
+      }
+    }
+  }
+}
+
+void sendLocationToServer(int id, double latitude, double longitude) {
+  if (!modem.isGprsConnected()) {
+    Serial.println("GPRS disconnected! Reconnecting...");
+    if (!modem.gprsConnect(apn, user, pass)) {
+      Serial.println("Failed to reconnect GPRS!");
+      return;
+    }
+  }
+
+  // Create JSON object
+  StaticJsonDocument<200> jsonDoc;
+  jsonDoc["id"] = id;
+  jsonDoc["latitude"] = latitude;
+  jsonDoc["longitude"] = longitude;
+
+  String jsonString;
+  serializeJson(jsonDoc, jsonString);
+
+  // Connect to the server
+  if (!client.connect(serverURL, 80)) {
+    Serial.println("Failed to connect to server!");
+    return;
+  }
+
+  // Send HTTP PUT request
+  client.print(String("PUT ") + "/api/update/1" + " HTTP/1.1\r\n" +
+               "Host: bike-go.workaround.services\r\n" +
+               "Content-Type: application/json\r\n" +
+               "Content-Length: " + jsonString.length() + "\r\n\r\n" +
+               jsonString);
+
+  // Wait for server response
+  unsigned long timeout = millis();
+  while (client.connected() && !client.available() && millis() - timeout < 5000) {
+    delay(100);
+  }
+
+  while (client.available()) {
+    String response = client.readString();
+    Serial.println("Server Response: " + response);
+  }
+
+  client.stop();
+}
